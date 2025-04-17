@@ -16,6 +16,20 @@ app.use(express.json());
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
+const transporter = nodemailer.createTransport({
+  pool: true,                   // habilita pool de conexiones
+  maxConnections: 5,            // cuántas conexiones paralelas permitimos
+  maxMessages: 100,             // cuántos mensajes por conexión antes de reciclar
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
+});
+
+
 // Endpoint para subir el archivo Excel y parsearlo
 app.post('/upload', upload.single('file'), (req, res) => {
   try {
@@ -46,70 +60,61 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
 // Endpoint para enviar correos a los emails seleccionados
 app.post('/send-email', upload.single('attachment'), async (req, res) => {
-  let { emails, subject, message } = req.body;
-  console.log(emails, subject, message);
+  let { emails, names, subject, messageTemplate } = req.body;
 
-  if (!emails || !emails.length) {
+  console.log('Emails:', emails);
+  console.log('Nombres:', names);
+
+  // Asegurarnos de parsear el JSON si viene como string
+  if (typeof emails === 'string') {
+    try {
+      emails = JSON.parse(emails);
+    } catch {
+      return res.status(400).json({ success: false, error: 'Formato de emails inválido' });
+    }
+  }
+
+  if (typeof names === 'string') {
+    try {
+      names = JSON.parse(names);
+    } catch {
+      return res.status(400).json({ success: false, error: 'Formato de nombres inválido' });
+    }
+  }
+
+  if (!Array.isArray(emails) || emails.length === 0) {
     return res.status(400).json({ success: false, error: 'No hay correos para enviar' });
   }
 
-  try {
-    // Configura el transporter. Cambia los datos de host, port, user y pass por los de tu SMTP.
-    let transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-         user: process.env.SMTP_USER,
-         pass: process.env.SMTP_PASS
-      },
-      logger: true,
-      debug: false
+  // Preparamos el attachment UNA vez
+  const attachments = [];
+  if (req.file) {
+    attachments.push({
+      filename: req.file.originalname,
+      content: req.file.buffer,
+      contentType: req.file.mimetype
     });
-    
-    let attachments = [];
-    if (req.file) {
-      attachments.push({
-        filename: req.file.originalname,
-        content: req.file.buffer,
-        contentType: req.file.mimetype
+  }
+
+  try {
+    // Enviamos cada lote (batch) con el mismo attachment y transporter pool
+    for (let i = 0; i < emails.length; i++) {
+      const to = emails[i];
+      const name = names[i] || '';
+      // Reemplazo simple del placeholder
+      const personalizedText = messageTemplate.replace(/{{\s*nombre\s*}}/g, name);
+
+      await transporter.sendMail({
+        from: process.env.SMTP_USER,
+        to,
+        subject,
+        text: personalizedText,
+        attachments
       });
     }
-
-     // Convertir emails a un array si viene como string
-    try {
-      if (typeof emails === 'string') {
-        emails = JSON.parse(emails);
-      }
-    } catch (e) {
-      return res.status(400).json({ success: false, error: 'El formato de emails no es válido' });
-    }
-
-    // Envía el correo a cada email de la lista
-    // for (let email of emails) {
-    //   console.log('---------- INICIO CORREO PARA:', email);
-    //   await transporter.sendMail({
-    //     from: process.env.SMTP_USER,
-    //     to: email,
-    //     subject: subject,
-    //     text: message,
-    //     attachments:attachments
-    //     // También puedes enviar HTML:
-    //     // html: `<p>${message}</p>`
-    //   });
-    //   console.log('---------- FIN CORREO PARA:', email);
-    // }
-    console.time('send-emails');
-    const mailOptions = {
-      from: process.env.SMTP_USER,
-      subject: subject,
-      text: message,
-      attachments: attachments
-    };
-    await sendEmailsInBatches(transporter, emails, mailOptions, 20);
-    console.timeEnd('send-emails');
     res.json({ success: true, message: 'Correos enviados' });
   } catch (err) {
+    console.error('Error enviando mails:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
